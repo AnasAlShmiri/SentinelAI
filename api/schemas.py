@@ -1,29 +1,40 @@
 """
-SentinelAI - نماذج البيانات (Pydantic) لطلبات واستجابات الـ API
-
-هذا الملف فقط يعرّف "شكل" البيانات المتوقَّعة في الطلبات (Request Body)،
-لا يحتوي على أي منطق. المنطق الفعلي في agent/tools.py و agent/agent.py و database/db.py.
+SentinelAI - Pydantic request schemas.
 """
 
-from typing import Optional, Dict
+from typing import Dict, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ClassifyRequest(BaseModel):
-    """طلب تصنيف تدفّق شبكة واحد. استخدم أحد الحقلين فقط:
-    - sample_index: رقم صف حقيقي من بيانات الاختبار (0 إلى 227081) لتجربة سريعة.
-    - features: قاموس {اسم الخاصية: قيمة} لتدفّق مخصّص."""
+    """Classify exactly one source: a saved test sample or a custom feature dictionary."""
 
     sample_index: Optional[int] = Field(
-        None, description="رقم صف من بيانات الاختبار الحقيقية (0-227081)"
+        None,
+        ge=0,
+        description="Index of a saved test sample, when local X_test.npy/y_test.npy exist.",
     )
     features: Optional[Dict[str, float]] = Field(
-        None, description="قيم خصائص تدفّق مخصّص، مثال: {\"Dst Port\": 80, \"Flow Duration\": 5000}"
+        None,
+        description='Raw flow features, for example {"Dst Port": 80, "Flow Duration": 5000}.',
     )
+
+    @model_validator(mode="after")
+    def exactly_one_input(self):
+        has_sample = self.sample_index is not None
+        has_features = bool(self.features)
+        if has_sample == has_features:
+            raise ValueError("Send exactly one of sample_index or features.")
+        return self
 
 
 class AskRequest(BaseModel):
-    """سؤال بلغة طبيعية (عربي أو إنجليزي) يُوجَّه للوكيل الذكي."""
+    """Natural-language question sent to the SentinelAI agent."""
 
-    question: str = Field(..., min_length=1, description="السؤال بلغة طبيعية")
+    question: str = Field(
+        ...,
+        min_length=1,
+        max_length=4000,
+        description="Question in Arabic or English.",
+    )

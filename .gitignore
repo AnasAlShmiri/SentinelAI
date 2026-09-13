@@ -22,7 +22,11 @@ models/*.keras
 models/*.h5
 models/*.pkl
 
+# Local review / patch material
+SentinelAI_Review/
+SentinelAI_Review.zip
+.chatgpt_backup_*/
+
 # OS
 Thumbs.db
 .DS_Store
-SentinelAI_Review/

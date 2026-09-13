@@ -1,29 +1,32 @@
 """
-SentinelAI - أدوات الوكيل الذكي
+SentinelAI agent tools.
 
-هذا الملف يعرّف الأداتين الوحيدتين المسموح بهما للوكيل (حسب CLAUDE.md):
-1. classify_network_flow: يستخدم أفضل نموذج مدرَّب (models/best_model.joblib)
-   لتصنيف تدفّق شبكة واحد.
-2. query_database: يستعلم عن سجلات الاكتشاف المخزَّنة في database/sentinelai.db
-   عبر الدوال الجاهزة في database/db.py (لا SQL خام من الوكيل مباشرة).
+The agent can:
+1) classify one network-flow feature vector with the trained classifier;
+2) query predefined SQLite analytics.
 
-ممنوع تماماً أي أداة هجومية أو خدمة خارجية (RapidAPI أو غيرها) — هاتان الأداتان فقط.
+This module intentionally exposes no raw-SQL tool and no offensive action tool.
 """
 
+from __future__ import annotations
+
+import json
 import os
 import sys
-import json
+from pathlib import Path
+from typing import Any
 
+import joblib
 import numpy as np
 import pandas as pd
-import joblib
 
-BASE_DIR = os.path.join(os.path.dirname(__file__), "..")
-DATABASE_DIR = os.path.join(BASE_DIR, "database")
-MODELS_DIR = os.path.join(BASE_DIR, "models")
-PROCESSED_DIR = os.path.join(BASE_DIR, "data", "processed")
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATABASE_DIR = BASE_DIR / "database"
+MODELS_DIR = BASE_DIR / "models"
+PROCESSED_DIR = BASE_DIR / "data" / "processed"
 
-sys.path.insert(0, DATABASE_DIR)
+if str(DATABASE_DIR) not in sys.path:
+    sys.path.insert(0, str(DATABASE_DIR))
 import db  # noqa: E402
 
 _model = None
@@ -35,115 +38,229 @@ _X_test = None
 _y_test = None
 
 
-def _lazy_load():
-    """نحمّل النموذج والبيانات مرة واحدة فقط عند أول استخدام، وليس عند استيراد الملف."""
+def _required_path(path: Path, purpose: str) -> Path:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Missing {purpose}: {path}. "
+            "Restore the local trained/processed artifact before using classification."
+        )
+    return path
+
+
+def _lazy_load() -> None:
+    """Load core runtime artifacts once. Test arrays remain optional."""
     global _model, _label_encoder, _scaler, _feature_names, _label_mapping, _X_test, _y_test
     if _model is not None:
         return
-    _model = joblib.load(os.path.join(MODELS_DIR, "best_model.joblib"))
-    _label_encoder = joblib.load(os.path.join(MODELS_DIR, "best_model_label_encoder.joblib"))
-    _scaler = joblib.load(os.path.join(PROCESSED_DIR, "scaler.joblib"))
-    with open(os.path.join(PROCESSED_DIR, "feature_names.json"), encoding="utf-8") as f:
+
+    model_path = _required_path(MODELS_DIR / "best_model.joblib", "trained model")
+    encoder_path = _required_path(
+        MODELS_DIR / "best_model_label_encoder.joblib", "model label encoder"
+    )
+    scaler_path = _required_path(PROCESSED_DIR / "scaler.joblib", "training scaler")
+    features_path = _required_path(PROCESSED_DIR / "feature_names.json", "feature metadata")
+    mapping_path = _required_path(PROCESSED_DIR / "label_mapping.json", "label mapping")
+
+    _model = joblib.load(model_path)
+    _label_encoder = joblib.load(encoder_path)
+    _scaler = joblib.load(scaler_path)
+
+    with features_path.open(encoding="utf-8") as f:
         _feature_names = json.load(f)
-    with open(os.path.join(PROCESSED_DIR, "label_mapping.json"), encoding="utf-8") as f:
+
+    with mapping_path.open(encoding="utf-8") as f:
         _label_mapping = {int(k): v for k, v in json.load(f).items()}
-    _X_test = np.load(os.path.join(PROCESSED_DIR, "X_test.npy"))
-    _y_test = np.load(os.path.join(PROCESSED_DIR, "y_test.npy"))
+
+    x_test_path = PROCESSED_DIR / "X_test.npy"
+    y_test_path = PROCESSED_DIR / "y_test.npy"
+    if x_test_path.exists() and y_test_path.exists():
+        _X_test = np.load(x_test_path, mmap_mode="r")
+        _y_test = np.load(y_test_path, mmap_mode="r")
 
 
-def compute_risk_score(is_attack, confidence):
-    """درجة خطورة مبسّطة من 0 إلى 100 (نفس المنطق المستخدم عند تعبئة قاعدة البيانات
-    في database/populate_from_test_set.py):
-    - تصنيف هجوم بثقة عالية -> قريب من 100 (خطر عالٍ).
-    - تصنيف طبيعي بثقة عالية -> قريب من 0 (خطر منخفض)."""
+def compute_risk_score(is_attack: bool, confidence: float) -> float:
+    """Legacy confidence-based indicator retained for dashboard compatibility.
+
+    This is not a validated severity score. It only combines the selected class
+    (attack/benign) with model confidence.
+    """
+    confidence = min(max(float(confidence), 0.0), 1.0)
     if is_attack:
         return round(confidence * 100, 2)
-    return round((1 - confidence) * 20, 2)
+    return round((1.0 - confidence) * 20, 2)
 
 
-def classify_network_flow(sample_index=None, features=None):
-    """يصنّف تدفّق شبكة واحد باستخدام أفضل نموذج مدرَّب (XGBoost محسَّن).
+def _raw_baseline() -> np.ndarray:
+    """Return a reasonable raw-value baseline for omitted custom features.
 
-    استخدم أحد الخيارين فقط:
-    - sample_index: رقم صف حقيقي من بيانات الاختبار (0 إلى 227081) لتجربة سريعة
-      على بيانات حقيقية فعلاً (وليست مختلَقة).
-    - features: قاموس {اسم الخاصية: قيمة أصلية} لتدفّق مخصّص، مثل
-      {"Flow Duration": 5000, "Dst Port": 80}. أي خاصية غير مذكورة تُعتبر 0
-      (تبسيط، وليس قياساً حقيقياً — النتيجة في هذه الحالة تقريبية).
+    StandardScaler.mean_ is in the original feature space. Starting from that
+    vector means an omitted feature becomes approximately zero after scaling,
+    instead of pretending the real raw value was literally zero.
+    """
+    n_features = len(_feature_names)
+    means = getattr(_scaler, "mean_", None)
+    if means is not None and len(means) == n_features:
+        return np.asarray(means, dtype=float).reshape(1, -1).copy()
+    return np.zeros((1, n_features), dtype=float)
+
+
+def _label_name(code: int) -> str:
+    return _label_mapping.get(code, f"Class_{code}")
+
+
+def classify_network_flow(sample_index=None, features=None) -> dict[str, Any]:
+    """Classify one network flow.
+
+    Exactly one input mode should be used:
+    - sample_index: local saved test row (requires X_test.npy and y_test.npy)
+    - features: raw custom features keyed by feature name
+
+    Custom partial dictionaries use the scaler training mean for omitted values.
     """
     _lazy_load()
 
-    if sample_index is not None:
-        idx = int(sample_index)
+    using_sample = sample_index is not None
+    using_features = bool(features)
+
+    if using_sample == using_features:
+        return {"error": "حدد sample_index أو features فقط، وليس الاثنين معاً."}
+
+    true_label = None
+    warnings = []
+
+    if using_sample:
+        if _X_test is None or _y_test is None:
+            return {
+                "error": (
+                    "sample_index غير متاح لأن X_test.npy/y_test.npy غير موجودين محلياً. "
+                    "استخدم features أو أعد ملفات الاختبار."
+                )
+            }
+
+        try:
+            idx = int(sample_index)
+        except (TypeError, ValueError):
+            return {"error": "sample_index يجب أن يكون رقماً صحيحاً."}
+
         if idx < 0 or idx >= _X_test.shape[0]:
             return {"error": f"sample_index يجب أن يكون بين 0 و {_X_test.shape[0] - 1}"}
-        x_scaled = _X_test[idx:idx + 1]
+
+        x_scaled = np.asarray(_X_test[idx : idx + 1])
         true_code = int(_y_test[idx])
-        true_label = _label_mapping[true_code]
-    elif features:
-        raw_row = np.zeros((1, len(_feature_names)))
+        true_label = _label_name(true_code)
+
+    else:
+        raw_row = _raw_baseline()
+        feature_index = {name: i for i, name in enumerate(_feature_names)}
         unknown_features = []
+        invalid_features = []
+
         for name, value in features.items():
-            if name in _feature_names:
-                raw_row[0, _feature_names.index(name)] = float(value)
-            else:
+            if name not in feature_index:
                 unknown_features.append(name)
+                continue
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError):
+                invalid_features.append(name)
+                continue
+            if not np.isfinite(numeric_value):
+                invalid_features.append(name)
+                continue
+            raw_row[0, feature_index[name]] = numeric_value
+
+        if invalid_features:
+            return {
+                "error": f"قيم غير رقمية/غير محدودة للخصائص: {sorted(invalid_features)}"
+            }
+
         raw_df = pd.DataFrame(raw_row, columns=_feature_names)
         x_scaled = _scaler.transform(raw_df)
-        true_label = None
-    else:
-        return {"error": "يجب تحديد sample_index أو features"}
 
-    proba = _model.predict_proba(x_scaled)[0]
+        supplied_known = len(features) - len(unknown_features)
+        missing_count = max(len(_feature_names) - supplied_known, 0)
+        if missing_count:
+            warnings.append(
+                f"{missing_count} خاصية غير مرسلة تم تعويضها بمتوسط التدريب قبل StandardScaler."
+            )
+        if unknown_features:
+            warnings.append(f"خصائص غير معروفة تم تجاهلها: {sorted(unknown_features)}")
+
+    proba = np.asarray(_model.predict_proba(x_scaled))[0]
     pred_encoded = int(np.argmax(proba))
     confidence = float(proba[pred_encoded])
     pred_code = int(_label_encoder.inverse_transform([pred_encoded])[0])
-    pred_label = _label_mapping[pred_code]
-
+    pred_label = _label_name(pred_code)
     is_attack = pred_code != 1
+
     result = {
         "predicted_attack_type": pred_label,
         "predicted_label_code": pred_code,
         "confidence": round(confidence, 4),
+        "confidence_percent": round(confidence * 100, 2),
         "is_attack": is_attack,
         "risk_score": compute_risk_score(is_attack, confidence),
+        "risk_basis": "confidence_only",
+        "label_mapping_resolved": not pred_label.startswith("Attack_"),
     }
+
     if true_label is not None:
         result["true_attack_type"] = true_label
-        result["prediction_correct"] = (true_label == pred_label)
-    if features is not None and unknown_features:
-        result["warning"] = f"خصائص غير معروفة تم تجاهلها: {unknown_features}"
+        result["prediction_correct"] = true_label == pred_label
+
+    if warnings:
+        result["warnings"] = warnings
+
     return result
 
 
 def query_database(query_type, **kwargs):
-    """ينفّذ استعلاماً محدَّداً مسبقاً على قاعدة بيانات الاكتشافات (لا SQL خام).
-
-    query_type أحد: by_attack_type, top_attacks, counts, recent, high_risk, by_date_range
-    """
+    """Run one predefined analytics query; the agent never receives raw SQL."""
     conn = db.get_connection()
     try:
+        run_id = kwargs.get("run_id")
         if query_type == "by_attack_type":
             rows = db.query_by_attack_type(
-                conn, kwargs.get("attack_type", ""), limit=kwargs.get("limit", 20)
+                conn,
+                kwargs.get("attack_type", ""),
+                limit=kwargs.get("limit", 20),
+                run_id=run_id,
             )
         elif query_type == "top_attacks":
-            rows = db.query_top_attacks(conn, limit=kwargs.get("limit", 10))
+            rows = db.query_top_attacks(
+                conn, limit=kwargs.get("limit", 10), run_id=run_id
+            )
         elif query_type == "counts":
-            rows = db.query_counts(conn)
+            rows = db.query_counts(conn, run_id=run_id)
         elif query_type == "recent":
-            rows = db.query_recent(conn, limit=kwargs.get("limit", 20))
+            rows = db.query_recent(
+                conn, limit=kwargs.get("limit", 20), run_id=run_id
+            )
         elif query_type == "high_risk":
             rows = db.query_high_risk(
-                conn, min_risk_score=kwargs.get("min_risk_score", 80), limit=kwargs.get("limit", 20)
+                conn,
+                min_risk_score=kwargs.get("min_risk_score", 80),
+                limit=kwargs.get("limit", 20),
+                run_id=run_id,
             )
         elif query_type == "by_date_range":
             rows = db.query_by_date_range(
-                conn, kwargs["start_date"], kwargs["end_date"], limit=kwargs.get("limit", 100)
+                conn,
+                kwargs["start_date"],
+                kwargs["end_date"],
+                limit=kwargs.get("limit", 100),
+                run_id=run_id,
             )
         else:
             return {"error": f"query_type غير معروف: {query_type}"}
-        return {"rows": rows, "count": len(rows)}
+
+        effective_run_id = run_id if run_id is not None else db.get_latest_run_id(conn)
+        return {
+            "rows": rows,
+            "count": len(rows),
+            "run_id": effective_run_id,
+            "scope": "requested_run" if run_id is not None else "latest_run",
+        }
     finally:
         conn.close()
 
@@ -154,9 +271,8 @@ TOOLS_SCHEMA = [
         "function": {
             "name": "query_database",
             "description": (
-                "استعلام عن سجلات الاكتشاف المخزَّنة في قاعدة بيانات SQLite. "
-                "استخدمه لأي سؤال عن إحصائيات، أعداد الهجمات، أخطر الهجمات، "
-                "أحدث السجلات، أو سجلات في فترة زمنية معيّنة."
+                "استعلام دفاعي عن سجلات وإحصائيات الاكتشاف المخزنة في SQLite. "
+                "إذا لم يحدد run_id تستخدم الاستعلامات أحدث تشغيل فقط لتجنب جمع دفعات مستقلة."
             ),
             "parameters": {
                 "type": "object",
@@ -164,23 +280,26 @@ TOOLS_SCHEMA = [
                     "query_type": {
                         "type": "string",
                         "enum": [
-                            "by_attack_type", "top_attacks", "counts",
-                            "recent", "high_risk", "by_date_range",
+                            "by_attack_type",
+                            "top_attacks",
+                            "counts",
+                            "recent",
+                            "high_risk",
+                            "by_date_range",
                         ],
-                        "description": (
-                            "by_attack_type: كل سجلات نوع هجوم معيّن. "
-                            "top_attacks: أكثر أنواع الهجمات تكراراً. "
-                            "counts: عدد ومتوسط الثقة/الخطورة لكل نوع (يشمل Benign). "
-                            "recent: آخر السجلات المُدخلة. "
-                            "high_risk: السجلات الأعلى في درجة الخطورة (risk_score). "
-                            "by_date_range: سجلات بين تاريخين."
-                        ),
                     },
-                    "attack_type": {"type": "string", "description": "مثال: Attack_4 أو Benign (فقط مع by_attack_type)"},
-                    "limit": {"type": "integer", "description": "أقصى عدد نتائج (اختياري)"},
-                    "min_risk_score": {"type": "number", "description": "أقل درجة خطورة 0-100 (فقط مع high_risk)"},
-                    "start_date": {"type": "string", "description": "تاريخ البداية ISO (فقط مع by_date_range)"},
-                    "end_date": {"type": "string", "description": "تاريخ النهاية ISO (فقط مع by_date_range)"},
+                    "attack_type": {"type": "string"},
+                    "limit": {"type": "integer"},
+                    "min_risk_score": {
+                        "type": "number",
+                        "description": "مؤشر confidence-based قديم، وليس severity حقيقية.",
+                    },
+                    "start_date": {"type": "string"},
+                    "end_date": {"type": "string"},
+                    "run_id": {
+                        "type": "integer",
+                        "description": "اختياري. عند حذفه يتم استخدام أحدث تشغيل.",
+                    },
                 },
                 "required": ["query_type"],
             },
@@ -191,19 +310,16 @@ TOOLS_SCHEMA = [
         "function": {
             "name": "classify_network_flow",
             "description": (
-                "يصنّف تدفّق شبكة واحد باستخدام أفضل نموذج مدرَّب، لمعرفة هل هو "
-                "طبيعي (Benign) أم نوع هجوم معيّن، مع نسبة ثقة النموذج."
+                "يصنف تدفق شبكة واحد بالمودل المدرب. استخدم sample_index لصف اختبار محلي "
+                "أو features لقيم تدفق مخصصة."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "sample_index": {
-                        "type": "integer",
-                        "description": "رقم صف حقيقي من بيانات الاختبار (0 إلى 227081) لتجربة سريعة",
-                    },
+                    "sample_index": {"type": "integer"},
                     "features": {
                         "type": "object",
-                        "description": "قاموس اختياري لقيم خصائص تدفّق مخصّص (اسم الخاصية -> رقم)",
+                        "additionalProperties": {"type": "number"},
                     },
                 },
                 "required": [],

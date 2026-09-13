@@ -1,28 +1,24 @@
 """
-SentinelAI - تعبئة قاعدة البيانات ببيانات اكتشاف حقيقية
+Populate SentinelAI's SQLite database from the saved test set.
 
-يشغّل هذا السكربت أفضل نموذج مدرَّب (models/best_model.joblib) على بيانات الاختبار
-الكاملة (data/processed/X_test.npy)، ويخزّن كل التوقعات في قاعدة بيانات SQLite
-(database/sentinelai.db)، حتى يكون لدينا بيانات حقيقية (وليست وهمية) للاستعلام عنها
-في مرحلة الوكيل الذكي القادمة.
+The script is idempotent by default: the same demo test-set batch is not inserted
+again silently. Use --replace to intentionally replace that batch.
 
-ملاحظتان مهمتان عن البيانات المُدخلة (للشفافية):
-1. "dst_port" و"protocol" و"flow_duration" مُستخرجة فعلياً من بيانات الاختبار عبر عكس
-   عملية StandardScaler (scaler.inverse_transform) — هذا الملف لا يحتوي أصلاً على عناوين
-   IP (لا للمصدر ولا للوجهة)، لذلك هذه هي "معلومات المصدر" الوحيدة المتوفرة في العيّنة.
-2. عمود "timestamp": بيانات CSE-CIC-IDS2018 المعالَجة هنا لا تحمل توقيت التقاط حقيقياً
-   لكل صف، لذلك وزّعنا زمن كل سجل بشكل متتابع (Simulated) على نافذة زمنية آخر 7 أيام،
-   فقط حتى تكون استعلامات "حسب التاريخ" ذات معنى للتجربة. التصنيف والثقة ودرجة الخطورة
-   كلها نتائج حقيقية من النموذج، ولا شيء منها مُختلَق.
+The processed arrays do not contain original capture timestamps. This script
+therefore generates simulated timestamps and records that fact in model_runs.
 """
 
+from __future__ import annotations
+
+import argparse
+import json
 import os
 import sys
-import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-import numpy as np
 import joblib
+import numpy as np
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -30,65 +26,110 @@ if hasattr(sys.stdout, "reconfigure"):
 sys.path.insert(0, os.path.dirname(__file__))
 import db  # noqa: E402
 
-BASE_DIR = os.path.join(os.path.dirname(__file__), "..")
-PROCESSED_DIR = os.path.join(BASE_DIR, "data", "processed")
-MODELS_DIR = os.path.join(BASE_DIR, "models")
+BASE_DIR = Path(__file__).resolve().parent.parent
+PROCESSED_DIR = BASE_DIR / "data" / "processed"
+MODELS_DIR = BASE_DIR / "models"
 
 TIME_WINDOW_DAYS = 7
+DEFAULT_RUN_KEY = "demo:test-set:v2"
 
 
 def compute_risk_score(is_attack, confidence):
-    """درجة خطورة مبسّطة من 0 إلى 100:
-    - تصنيف هجوم بثقة عالية -> قريب من 100 (خطر عالٍ).
-    - تصنيف طبيعي بثقة عالية -> قريب من 0 (خطر منخفض).
-    - أي عدم يقين من النموذج -> يقلّل ثقتنا في القرار (يرفع خطر الحالة الطبيعية قليلاً،
-      ويخفّض قليلاً خطر حالة الهجوم شديدة الثقة المنخفضة)."""
+    """Legacy confidence-based indicator retained for dashboard compatibility."""
+    confidence = min(max(float(confidence), 0.0), 1.0)
     if is_attack:
         return round(confidence * 100, 2)
-    return round((1 - confidence) * 20, 2)
+    return round((1.0 - confidence) * 20, 2)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--replace",
+        action="store_true",
+        help="Delete the previous demo run with the same run key before inserting.",
+    )
+    parser.add_argument(
+        "--run-key",
+        default=DEFAULT_RUN_KEY,
+        help="Stable key used to prevent accidental duplicate demo population.",
+    )
+    return parser.parse_args()
+
+
+def required(path: Path):
+    if not path.exists():
+        raise FileNotFoundError(f"Required local artifact not found: {path}")
+    return path
 
 
 def main():
-    print("تحميل البيانات والنموذج...")
-    X_test = np.load(os.path.join(PROCESSED_DIR, "X_test.npy"))
-    y_test = np.load(os.path.join(PROCESSED_DIR, "y_test.npy"))
+    args = parse_args()
 
-    with open(os.path.join(PROCESSED_DIR, "feature_names.json"), encoding="utf-8") as f:
+    x_path = required(PROCESSED_DIR / "X_test.npy")
+    y_path = required(PROCESSED_DIR / "y_test.npy")
+    feature_path = required(PROCESSED_DIR / "feature_names.json")
+    mapping_path = required(PROCESSED_DIR / "label_mapping.json")
+    scaler_path = required(PROCESSED_DIR / "scaler.joblib")
+    model_path = required(MODELS_DIR / "best_model.joblib")
+    encoder_path = required(MODELS_DIR / "best_model_label_encoder.joblib")
+
+    print("Loading test data and model...")
+    X_test = np.load(x_path)
+    y_test = np.load(y_path)
+
+    with feature_path.open(encoding="utf-8") as f:
         feature_names = json.load(f)
-    with open(os.path.join(PROCESSED_DIR, "label_mapping.json"), encoding="utf-8") as f:
+    with mapping_path.open(encoding="utf-8") as f:
         label_mapping = {int(k): v for k, v in json.load(f).items()}
 
-    scaler = joblib.load(os.path.join(PROCESSED_DIR, "scaler.joblib"))
-    model = joblib.load(os.path.join(MODELS_DIR, "best_model.joblib"))
-    label_encoder = joblib.load(os.path.join(MODELS_DIR, "best_model_label_encoder.joblib"))
+    scaler = joblib.load(scaler_path)
+    model = joblib.load(model_path)
+    label_encoder = joblib.load(encoder_path)
 
-    print(f"عدد صفوف الاختبار: {X_test.shape[0]:,}")
+    conn = db.get_connection()
+    db.create_tables(conn)
 
-    # استرجاع القيم الأصلية (غير المُقاسة) لبعض الأعمدة لعرضها كـ \"معلومات مصدر\"
+    existing = db.get_model_run_by_key(conn, args.run_key)
+    if existing and not args.replace:
+        print(
+            f"Demo batch already exists as run_id={existing['id']} "
+            f"(run_key={args.run_key}). Nothing was inserted."
+        )
+        print("Use --replace only if you intentionally want to rebuild that batch.")
+        conn.close()
+        return
+
+    if existing and args.replace:
+        print(f"Replacing previous run_id={existing['id']}...")
+        db.delete_model_run(conn, existing["id"])
+
+    print(f"Test rows: {X_test.shape[0]:,}")
+
+    # Recover a few human-readable raw values for the dashboard.
     X_test_original = scaler.inverse_transform(X_test)
     dst_port_idx = feature_names.index("Dst Port")
     protocol_idx = feature_names.index("Protocol")
     flow_duration_idx = feature_names.index("Flow Duration")
 
-    dst_ports = np.round(X_test_original[:, dst_port_idx]).astype(int)
-    protocols = np.round(X_test_original[:, protocol_idx]).astype(int)
-    flow_durations = np.round(X_test_original[:, flow_duration_idx]).astype(int)
+    dst_ports = np.rint(X_test_original[:, dst_port_idx]).astype(int)
+    protocols = np.rint(X_test_original[:, protocol_idx]).astype(int)
+    flow_durations = np.rint(X_test_original[:, flow_duration_idx]).astype(int)
 
-    print("تشغيل النموذج على بيانات الاختبار (predict_proba)...")
+    print("Running predict_proba...")
     pred_proba = model.predict_proba(X_test)
     pred_encoded = np.argmax(pred_proba, axis=1)
     confidences = pred_proba[np.arange(len(pred_encoded)), pred_encoded]
     pred_codes = label_encoder.inverse_transform(pred_encoded)
 
-    # توزيع زمني اصطناعي (موثّق أعلاه) لجعل الاستعلام بحسب التاريخ ذا معنى
+    # Simulated presentation timestamps only.
     now = datetime.now(timezone.utc)
     window_seconds = TIME_WINDOW_DAYS * 24 * 3600
     start_time = now - timedelta(seconds=window_seconds)
     offsets = np.linspace(0, window_seconds, num=len(pred_codes))
-    timestamps = [(start_time + timedelta(seconds=float(off))).isoformat() for off in offsets]
-
-    conn = db.get_connection()
-    db.create_tables(conn)
+    timestamps = [
+        (start_time + timedelta(seconds=float(off))).isoformat() for off in offsets
+    ]
 
     run_id = db.insert_model_run(
         conn,
@@ -96,37 +137,50 @@ def main():
         model_path="models/best_model.joblib",
         num_records=len(pred_codes),
         notes=(
-            "دفعة أولية من كامل بيانات الاختبار (X_test/y_test) لتغذية قاعدة البيانات "
-            "ببيانات اكتشاف حقيقية قبل بدء مرحلة الوكيل الذكي."
+            "Demo/test-set inference batch. Classification outputs come from the trained "
+            "model; timestamps are simulated because original per-row capture timestamps "
+            "are not present in the processed arrays. risk_score is confidence-based only."
         ),
+        run_key=args.run_key,
+        source_kind="saved_test_set",
+        timestamps_simulated=True,
     )
 
-    print("تجهيز السجلات...")
     records = []
     for i in range(len(pred_codes)):
         pred_code = int(pred_codes[i])
         true_code = int(y_test[i])
-        is_attack = 0 if pred_code == 1 else 1
+        is_attack = pred_code != 1
         confidence = float(confidences[i])
-        records.append({
-            "timestamp": timestamps[i],
-            "dst_port": int(dst_ports[i]),
-            "protocol": int(protocols[i]),
-            "flow_duration": int(flow_durations[i]),
-            "predicted_label_code": pred_code,
-            "predicted_attack_type": label_mapping[pred_code],
-            "is_attack": is_attack,
-            "confidence": round(confidence, 4),
-            "risk_score": compute_risk_score(is_attack, confidence),
-            "true_label_code": true_code,
-            "true_attack_type": label_mapping[true_code],
-        })
 
-    print(f"إدخال {len(records):,} سجل اكتشاف في قاعدة البيانات...")
+        records.append(
+            {
+                "timestamp": timestamps[i],
+                "dst_port": int(dst_ports[i]),
+                "protocol": int(protocols[i]),
+                "flow_duration": int(flow_durations[i]),
+                "predicted_label_code": pred_code,
+                "predicted_attack_type": label_mapping.get(
+                    pred_code, f"Class_{pred_code}"
+                ),
+                "is_attack": int(is_attack),
+                "confidence": round(confidence, 4),
+                "risk_score": compute_risk_score(is_attack, confidence),
+                "true_label_code": true_code,
+                "true_attack_type": label_mapping.get(
+                    true_code, f"Class_{true_code}"
+                ),
+            }
+        )
+
+    print(f"Inserting {len(records):,} detections as run_id={run_id}...")
     db.insert_detections_batch(conn, run_id, records)
-    print(f"تم! قاعدة البيانات: {db.DB_PATH}")
-
     conn.close()
+
+    print("Done.")
+    print(f"Database: {db.DB_PATH}")
+    print(f"run_key: {args.run_key}")
+    print("timestamps_simulated: true")
 
 
 if __name__ == "__main__":
