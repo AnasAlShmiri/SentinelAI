@@ -1,0 +1,35 @@
+{
+  "algorithm": "XGBoost (Gradient Boosting)",
+  "selected_because": "أعلى F1-macro بين الخوارزميات السبع (0.9139 قبل التحسين)",
+  "hyperparameters": {
+    "subsample": 0.9,
+    "n_estimators": 200,
+    "max_depth": 5,
+    "learning_rate": 0.2,
+    "colsample_bytree": 0.7
+  },
+  "needs_label_encoder": true,
+  "label_encoder_file": "best_model_label_encoder.joblib",
+  "label_mapping": {
+    "1": "Benign",
+    "2": "Attack_2",
+    "3": "Attack_3",
+    "4": "Attack_4",
+    "5": "Attack_5",
+    "6": "Attack_6",
+    "7": "Attack_7",
+    "8": "Attack_8",
+    "9": "Attack_9",
+    "10": "Attack_10",
+    "11": "Attack_11"
+  },
+  "test_metrics": {
+    "accuracy": 0.9998634854369787,
+    "precision_macro": 0.900948891576006,
+    "recall_macro": 0.9746999782805205,
+    "f1_macro": 0.9306836260011679
+  },
+  "expects_scaled_features": true,
+  "scaler_file": "../data/processed/scaler.joblib",
+  "feature_order_file": "../data/processed/feature_names.json"
+}

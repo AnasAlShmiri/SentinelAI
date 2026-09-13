@@ -1,0 +1,9 @@
+النموذج,النوع,F1-macro / F1,Accuracy
+XGBoost (Tuned) — best_model.joblib,Supervised (محسَّن),0.9307,0.9999
+Gradient Boosting (XGBoost),Supervised,0.9139,0.9998
+Random Forest,Supervised,0.8802,0.9995
+Logistic Regression,Supervised,0.7045,0.9353
+CNN (1D Conv),Deep Learning,0.6474,0.933
+Isolation Forest,Unsupervised,0.096,0.5933
+DBSCAN,Unsupervised,0.0436,0.7016
+K-Means,Unsupervised,0.0,0.7751

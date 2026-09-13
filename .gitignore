@@ -1,0 +1,27 @@
+# Secrets
+.env
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Database
+database/*.db
+
+# Dataset / large arrays
+data/*.csv
+data/raw/
+data/processed/*.npy
+
+# Large trained models
+models/*.joblib
+models/*.keras
+models/*.h5
+models/*.pkl
+
+# OS
+Thumbs.db
+.DS_Store

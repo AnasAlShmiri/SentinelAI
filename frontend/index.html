@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SentinelAI - لوحة المراقبة</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<header>
+  <h1>🛡️ SentinelAI</h1>
+  <p>منصّة دفاعية لكشف وتصنيف تهديدات الشبكات — نموذج مدرَّب + وكيل ذكي</p>
+</header>
+
+<main>
+
+  <!-- 1) ملخّص الأعداد -->
+  <section class="card">
+    <h2>
+      ملخّص الاكتشافات
+      <button class="btn" id="refresh-summary">تحديث</button>
+    </h2>
+    <div id="summary-grid" class="summary-grid"></div>
+    <div id="summary-status" class="status-msg"></div>
+  </section>
+
+  <!-- 2) الرسم البياني -->
+  <section class="card">
+    <h2>توزيع أنواع الهجمات</h2>
+    <div class="chart-wrap">
+      <canvas id="attack-chart"></canvas>
+    </div>
+  </section>
+
+  <!-- 3) جدول السجلات -->
+  <section class="card">
+    <h2>
+      سجلات الاكتشاف
+      <span class="hint">الأحدث أو الأعلى خطورة</span>
+    </h2>
+    <div class="table-controls">
+      <select id="table-kind">
+        <option value="recent">الأحدث</option>
+        <option value="high_risk">الأعلى خطورة (≥ 70)</option>
+      </select>
+      <label>عدد الصفوف: <input type="number" id="table-limit" value="20" min="1" max="200" style="width:70px" /></label>
+      <button class="btn" id="refresh-table">تحديث</button>
+      <span id="table-status" class="status-msg"></span>
+    </div>
+    <div class="table-scroll">
+      <table id="detections-table">
+        <thead>
+          <tr>
+            <th>الوقت</th>
+            <th>المنفذ</th>
+            <th>البروتوكول</th>
+            <th>التصنيف المتوقَّع</th>
+            <th>الثقة</th>
+            <th>الخطورة</th>
+            <th>التصنيف الحقيقي</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 4) نموذج التصنيف -->
+  <section class="card">
+    <h2>تصنيف تدفّق شبكة</h2>
+
+    <form id="classify-form">
+      <div class="mode-switch">
+        <label><input type="radio" name="classify-mode" value="quick" checked /> اختبار سريع (سجل حقيقي)</label>
+        <label><input type="radio" name="classify-mode" value="custom" /> قيم مخصّصة</label>
+      </div>
+
+      <div id="mode-quick" class="classify-grid">
+        <div class="field">
+          <label for="sample-index">رقم السجل (0 إلى 227081)</label>
+          <input type="number" id="sample-index" min="0" max="227081" value="100" />
+        </div>
+      </div>
+
+      <div id="mode-custom" class="classify-grid hidden">
+        <div class="field">
+          <label>Dst Port</label>
+          <input type="number" data-feature="Dst Port" placeholder="مثال: 80" />
+        </div>
+        <div class="field">
+          <label>Protocol (6=TCP, 17=UDP)</label>
+          <input type="number" data-feature="Protocol" placeholder="مثال: 6" />
+        </div>
+        <div class="field">
+          <label>Flow Duration</label>
+          <input type="number" data-feature="Flow Duration" placeholder="بالميكروثانية" />
+        </div>
+        <div class="field">
+          <label>Tot Fwd Pkts</label>
+          <input type="number" data-feature="Tot Fwd Pkts" />
+        </div>
+        <div class="field">
+          <label>Tot Bwd Pkts</label>
+          <input type="number" data-feature="Tot Bwd Pkts" />
+        </div>
+        <div class="field">
+          <label>Flow Byts/s</label>
+          <input type="number" data-feature="Flow Byts/s" />
+        </div>
+        <div class="field">
+          <label>Flow Pkts/s</label>
+          <input type="number" data-feature="Flow Pkts/s" />
+        </div>
+      </div>
+      <div class="note">
+        في وضع "قيم مخصّصة": أي خاصية لا تُعبّئها تُعتبر صفراً، لذلك النتيجة تقريبية
+        (النموذج تدرَّب على 77 خاصية فعلياً). لتجربة دقيقة استخدم "اختبار سريع".
+      </div>
+
+      <br />
+      <button type="submit" class="btn" id="classify-btn">تصنيف</button>
+    </form>
+
+    <div id="classify-result" class="result-box hidden"></div>
+  </section>
+
+  <!-- 5) الدردشة مع الوكيل -->
+  <section class="card">
+    <h2>اسأل الوكيل الذكي</h2>
+    <div id="chat-window" class="chat-window"></div>
+    <form id="chat-form" class="chat-input-row">
+      <input type="text" id="chat-input" placeholder="اكتب سؤالك هنا... مثال: كم عدد هجمات Attack_4؟" autocomplete="off" />
+      <button type="submit" class="btn">إرسال</button>
+    </form>
+  </section>
+
+</main>
+
+<footer>SentinelAI — مشروع دفاعي تعليمي (كشف تهديدات فقط، بلا أي أدوات هجومية)</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.1/chart.umd.min.js"></script>
+<script>
+  // الرابط أعلاه أحياناً يفشل (تغيّر الإصدار على cdnjs)، فهذا احتياط يحمّل نسخة بديلة من jsDelivr
+  if (typeof Chart === "undefined") {
+    document.write('<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"><\/script>');
+  }
+</script>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

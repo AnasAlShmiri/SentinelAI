@@ -1,0 +1,2 @@
+,Accuracy,Precision (macro),Recall (macro),F1-score (macro),Training Time (s)
+CNN (1D Conv),0.933,0.6204,0.9565,0.6474,451.1466
