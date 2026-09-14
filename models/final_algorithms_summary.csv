@@ -1,9 +1,8 @@
-النموذج,النوع,F1-macro / F1,Accuracy
-XGBoost (Tuned) — best_model.joblib,Supervised (محسَّن),0.9307,0.9999
-Gradient Boosting (XGBoost),Supervised,0.9139,0.9998
-Random Forest,Supervised,0.8802,0.9995
-Logistic Regression,Supervised,0.7045,0.9353
-CNN (1D Conv),Deep Learning,0.6474,0.933
-Isolation Forest,Unsupervised,0.096,0.5933
-DBSCAN,Unsupervised,0.0436,0.7016
-K-Means,Unsupervised,0.0,0.7751
+Model,Task,Evaluation_Split,Accuracy,Primary_Metric,Primary_Score
+Gradient Boosting (XGBoost),multiclass_classification,validation,0.9997269708739576,macro_f1_validation,0.9366592369526422
+Random Forest,multiclass_classification,validation,0.999497978703728,macro_f1_validation,0.8999426817857047
+Logistic Regression,multiclass_classification,validation,0.9341471362767636,macro_f1_validation,0.699078363935141
+CNN (1D Conv),multiclass_classification,validation,0.9845606432918506,macro_f1_validation,0.6721142564207802
+K-Means,binary_anomaly_detection,validation,0.5856827049259739,binary_f1_validation,0.1842899254378359
+Isolation Forest,binary_anomaly_detection,validation,0.6850741141966338,binary_f1_validation,0.0110081593140644
+DBSCAN,binary_anomaly_detection,validation,0.7346,binary_f1_validation,0.0094550883304304

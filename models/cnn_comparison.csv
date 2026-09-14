@@ -1,2 +1,2 @@
-,Accuracy,Precision (macro),Recall (macro),F1-score (macro),Training Time (s)
-CNN (1D Conv),0.933,0.6204,0.9565,0.6474,451.1466
+Model,Evaluation_Split,Accuracy,Precision_macro,Recall_macro,F1_macro,Train_seconds
+CNN (1D Conv),validation,0.9845606432918506,0.6268642769189704,0.9363866069520345,0.6721142564207802,1660.9298603534698

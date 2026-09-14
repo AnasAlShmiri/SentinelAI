@@ -1,0 +1,21 @@
+{
+  "rows_after_cleaning": 1135409,
+  "columns": 81,
+  "label_mode": "numeric_generic_mapping",
+  "benign_ratio": 0.7751039493257496,
+  "attack_ratio": 0.22489605067425042,
+  "classes": {
+    "1": "Benign",
+    "2": "Attack_2",
+    "3": "Attack_3",
+    "4": "Attack_4",
+    "5": "Attack_5",
+    "6": "Attack_6",
+    "7": "Attack_7",
+    "8": "Attack_8",
+    "9": "Attack_9",
+    "10": "Attack_10",
+    "11": "Attack_11"
+  },
+  "semantic_attack_mapping_verified": false
+}
